@@ -14,7 +14,80 @@ from ultralytics.utils.torch_utils import autocast
 from .metrics import bbox_iou, probiou
 from .tal import bbox2dist
 
+class SIoU(nn.Module):
+    """
+    SIoU loss as defined in Eq.(1-8) of the HCLT-YOLO paper[1].
+    Works as a drop-in replacement for GIoU/CIoU in Ultralytics.
+    """
 
+    def __init__(self, reduction: str = "mean", theta: float = 4.0,
+                 gamma: float = 2.0):
+        super().__init__()
+        self.reduction = reduction
+        self.theta = theta  # shape-importance coeff
+        self.gamma = gamma  # distance-priority coeff
+
+    def forward(self, pred_boxes, target_boxes):
+        """
+        pred_boxes   Nx4  (x1,y1,x2,y2)   *absolute* coords
+        target_boxes Nx4
+        """
+        # IoU ‑--------------------------------------------------------
+        lt = torch.max(pred_boxes[:, :2], target_boxes[:, :2])
+        rb = torch.min(pred_boxes[:, 2:], target_boxes[:, 2:])
+        inter = (rb - lt).clamp(min=0)
+        inter_area = inter[:, 0] * inter[:, 1]
+
+        area_p = (pred_boxes[:, 2] - pred_boxes[:, 0]) * \
+                 (pred_boxes[:, 3] - pred_boxes[:, 1])
+        area_t = (target_boxes[:, 2] - target_boxes[:, 0]) * \
+                 (target_boxes[:, 3] - target_boxes[:, 1])
+
+        union_area = area_p + area_t - inter_area + 1e-7
+        iou = inter_area / union_area
+
+        # Center distance ‑-------------------------------------------
+        cx_p = (pred_boxes[:, 0] + pred_boxes[:, 2]) / 2
+        cy_p = (pred_boxes[:, 1] + pred_boxes[:, 3]) / 2
+        cx_t = (target_boxes[:, 0] + target_boxes[:, 2]) / 2
+        cy_t = (target_boxes[:, 1] + target_boxes[:, 3]) / 2
+        dist = (cx_t - cx_p).pow(2) + (cy_t - cy_p).pow(2)
+
+        # Bounding box diagonal
+        ch = torch.abs(cy_t - cy_p)
+        x = ch / (dist.sqrt() + 1e-7)
+        angle_cost = 1 - 2 * torch.sin(
+            torch.asin(torch.clamp(x, -1.0, 1.0)) - torch.pi / 4
+        ).pow(2)
+
+        # Shape cost
+        w_p = pred_boxes[:, 2] - pred_boxes[:, 0]
+        h_p = pred_boxes[:, 3] - pred_boxes[:, 1]
+        w_t = target_boxes[:, 2] - target_boxes[:, 0]
+        h_t = target_boxes[:, 3] - target_boxes[:, 1]
+        shape_cost = (1 - torch.exp(-self.theta * ((w_p - w_t).abs() /
+                                                  (w_t + 1e-7)))) + \
+                     (1 - torch.exp(-self.theta * ((h_p - h_t).abs() /
+                                                  (h_t + 1e-7))))
+
+        # Distance cost
+        distance_cost = (1 - torch.exp(-self.gamma * dist /
+                                       (union_area + 1e-7)))
+
+        siou = angle_cost + distance_cost + shape_cost + (1 - iou)
+
+        if self.reduction == "sum":
+            return siou.sum()
+        elif self.reduction == "none":
+            return siou
+        else:
+            return siou.mean()
+
+
+# -------------------------------------------------------------------
+#  Register SIoU so it is selectable via  loss_bbox=siou
+# -------------------------------------------------------------------
+_LOSS_REGISTRY["siou"] = SIoU
 class VarifocalLoss(nn.Module):
     """
     Varifocal loss by Zhang et al.
