@@ -84,10 +84,9 @@ class SIoU(nn.Module):
             return siou.mean()
 
 
-# -------------------------------------------------------------------
-#  Register SIoU so it is selectable via  loss_bbox=siou
-# -------------------------------------------------------------------
-_LOSS_REGISTRY["siou"] = SIoU
+from ultralytics.utils.loss import LOSSES   
+LOSSES["siou"] = SIoU
+
 class VarifocalLoss(nn.Module):
     """
     Varifocal loss by Zhang et al.
